@@ -1,0 +1,710 @@
+
+
+
+
+"use client";
+
+import { useEffect, useState } from "react";
+import { createClient } from "@/lib/supabase/client";
+
+type Item = {
+  id: string;
+  name: string;
+  done: boolean;
+  scheduled_date: string | null;
+};
+
+type ItemType = "task" | "goal" | "habit";
+
+const defaults = {
+  task: [
+    "Plan my day",
+    "Drink enough water",
+    "Work towards a personal goal",
+  ],
+  goal: ["Learn a new skill", "Improve my fitness"],
+  habit: [
+    "Read for 15 minutes",
+    "Go for a walk",
+    "Drink water regularly",
+  ],
+};
+
+export default function Home() {
+  const [tasks, setTasks] = useState<Item[]>([]);
+  const [goals, setGoals] = useState<Item[]>([]);
+  const [habits, setHabits] = useState<Item[]>([]);
+
+  const [newTask, setNewTask] = useState("");
+  const [newTaskDate, setNewTaskDate] = useState("");
+  const [newGoal, setNewGoal] = useState("");
+  const [newHabit, setNewHabit] = useState("");
+
+  const [loading, setLoading] = useState(true);
+  const [message, setMessage] = useState("");
+async function handleLogout() { 
+  const supabase = createClient();
+  const { error } = await supabase.auth.signOut({
+    scope: "local",
+  });
+
+  if (error) {
+    alert(error.message);
+    return;
+  }
+
+  window.location.assign("/login");
+}
+  // Load the signed-in user's information from Supabase.
+  // If their database is empty, migrate their browser data once.
+  useEffect(() => {
+    async function loadDashboard() {
+      try {
+        const supabase = createClient();
+
+        const { data: userData, error: userError } =
+          await supabase.auth.getUser();
+
+        if (userError) throw userError;
+
+        const user = userData.user;
+
+        if (!user) {
+          setMessage("Please sign in to access your LifePilot dashboard.");
+          return;
+        }
+
+        const { data: rows, error: readError } = await supabase
+          .from("life_items")
+          .select("id, item_type, title, completed, scheduled_date");
+        if (readError) throw readError;
+
+        let savedRows = rows ?? [];
+
+        const migrationKey = `lifepilot-migrated-${user.id}`;
+        const alreadyMigrated =
+          localStorage.getItem(migrationKey) === "true";
+
+        if (savedRows.length === 0 && !alreadyMigrated) {
+          function readOldItems(key: string, fallback: string[]) {
+            try {
+              const saved = localStorage.getItem(key);
+              if (!saved) return fallback;
+
+              const parsed = JSON.parse(saved);
+
+              if (!Array.isArray(parsed)) return fallback;
+
+              return parsed
+                .filter(
+                  (item) =>
+                    typeof item.name === "string" &&
+                    typeof item.done === "boolean"
+                )
+                .map((item) => ({
+                  name: item.name,
+                  done: item.done,
+                }));
+            } catch {
+              return fallback;
+            }
+          }
+
+          const oldTasks = readOldItems(
+            "lifepilot-tasks",
+            defaults.task.map((name) => ({ name, done: false }))
+          );
+
+          const oldGoals = readOldItems(
+            "lifepilot-goals",
+            defaults.goal.map((name) => ({ name, done: false }))
+          );
+
+          const oldHabits = readOldItems(
+            "lifepilot-habits",
+            defaults.habit.map((name) => ({ name, done: false }))
+          );
+
+          const itemsToImport = [
+            ...oldTasks.map((item) => ({
+              user_id: user.id,
+              item_type: "task",
+              title: item.name,
+              completed: item.done,
+            })),
+            ...oldGoals.map((item) => ({
+              user_id: user.id,
+              item_type: "goal",
+              title: item.name,
+              completed: item.done,
+            })),
+            ...oldHabits.map((item) => ({
+              user_id: user.id,
+              item_type: "habit",
+              title: item.name,
+              completed: item.done,
+            })),
+          ];
+
+          if (itemsToImport.length > 0) {
+            const { error: importError } = await supabase
+              .from("life_items")
+              .insert(itemsToImport);
+
+            if (importError) throw importError;
+          }
+
+          localStorage.setItem(migrationKey, "true");
+
+          const { data: importedRows, error: reloadError } =
+            await supabase
+              .from("life_items")
+              .select("id, item_type, title, completed");
+
+          if (reloadError) throw reloadError;
+
+          savedRows = importedRows ?? [];
+        } else {
+          localStorage.setItem(migrationKey, "true");
+        }
+
+        function convertRows(type: ItemType): Item[] {
+          return savedRows
+            .filter((row) => row.item_type === type)
+            .map((row) => ({
+              id: row.id,
+              name: row.title,
+              done: row.completed,
+              scheduled_date: row.scheduled_date ?? null,
+            }));
+        }
+
+        setTasks(convertRows("task"));
+        setGoals(convertRows("goal"));
+        setHabits(convertRows("habit"));
+      } catch (error) {
+        console.error("Dashboard loading error:", error);
+        setMessage(
+          error instanceof Error
+            ? error.message
+            : "Could not load your LifePilot information."
+        );
+      } finally {
+        setLoading(false);
+      }
+    }
+
+    loadDashboard();
+  }, []);
+
+  // Add a new item directly to Supabase.
+  async function addItem(
+    name: string,
+    type: ItemType,
+    setItems: React.Dispatch<React.SetStateAction<Item[]>>,
+    clearInput: () => void
+  ) {
+    if (!name.trim()) return;
+
+    setMessage("");
+
+    try {
+      const supabase = createClient();
+
+      const { data: userData, error: userError } =
+        await supabase.auth.getUser();
+
+      if (userError) throw userError;
+      if (!userData.user) throw new Error("Please sign in first.");
+
+      const { data, error } = await supabase
+        .from("life_items")
+        .insert({
+  user_id: userData.user.id,
+  item_type: type,
+  title: name.trim(),
+  completed: false,
+  scheduled_date: type === "task" ? newTaskDate || null : null,
+})
+        .select("id, title, completed, scheduled_date")
+        .single();
+
+      if (error) throw error;
+
+      setItems((current) => [
+  ...current,
+  {
+    id: data.id,
+    name: data.title,
+    done: data.completed,
+    scheduled_date: data.scheduled_date ?? null,
+  },
+]);
+
+      clearInput();
+      if (type === "task") {
+  setNewTaskDate("");
+}
+    } catch (error) {
+      setMessage(
+        error instanceof Error ? error.message : "Could not save item."
+      );
+    }
+  }
+
+  // Save checkbox changes to Supabase.
+  async function toggleItem(
+    item: Item,
+    type: ItemType,
+    setItems: React.Dispatch<React.SetStateAction<Item[]>>
+  ) {
+    const updatedDone = !item.done;
+
+    try {
+      const supabase = createClient();
+
+      const { error } = await supabase
+        .from("life_items")
+        .update({ completed: updatedDone })
+        .eq("id", item.id)
+        .eq("item_type", type);
+
+      if (error) throw error;
+
+      setItems((current) =>
+        current.map((entry) =>
+          entry.id === item.id
+            ? { ...entry, done: updatedDone }
+            : entry
+        )
+      );
+    } catch (error) {
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : "Could not update item."
+      );
+    }
+  }
+async function deleteItem(
+  item: Item,
+  type: ItemType,
+  setItems: React.Dispatch<React.SetStateAction<Item[]>>
+) {
+  const confirmed = window.confirm(
+    `Are you sure you want to delete "${item.name}"?`
+  );
+
+  if (!confirmed) return;
+
+  try {
+    const supabase = createClient();
+
+    const { data: { user }, error: userError } =
+      await supabase.auth.getUser();
+
+    if (userError || !user) {
+      setMessage("Please log in again.");
+      return;
+    }
+
+    const { data, error } = await supabase
+      .from("life_items")
+      .delete()
+      .eq("id", item.id)
+      .eq("user_id", user.id)
+      .eq("item_type", type)
+      .select("id");
+
+    if (error) throw error;
+
+    if (!data || data.length === 0) {
+      setMessage("Item was not deleted. Please try again.");
+      return;
+    }
+
+    setItems((current) =>
+      current.filter((existing) => existing.id !== item.id)
+    );
+
+    setMessage("");
+  } catch (error) {
+    setMessage(
+      error instanceof Error
+        ? error.message
+        : "Could not delete item."
+    );
+  }
+}
+async function editItem(
+  item: Item,
+  type: ItemType,
+  setItems: React.Dispatch<React.SetStateAction<Item[]>>
+) {
+  const newName = window.prompt("Edit item name:", item.name);
+
+  if (newName === null) return;
+
+  const trimmedName = newName.trim();
+
+  if (!trimmedName) {
+    setMessage("Item name cannot be empty.");
+    return;
+  }
+
+  if (trimmedName === item.name) return;
+
+  try {
+    const supabase = createClient();
+
+    const { data: { user }, error: userError } =
+      await supabase.auth.getUser();
+
+    if (userError || !user) {
+      setMessage("Please log in again.");
+      return;
+    }
+
+    const { data, error } = await supabase
+      .from("life_items")
+      .update({ title: trimmedName })
+      .eq("id", item.id)
+      .eq("user_id", user.id)
+      .eq("item_type", type)
+      .select("id");
+
+    if (error) throw error;
+
+    if (!data || data.length === 0) {
+      setMessage("Item was not updated. Please try again.");
+      return;
+    }
+
+    setItems((current) =>
+      current.map((existing) =>
+        existing.id === item.id
+          ? { ...existing, name: trimmedName }
+          : existing
+      )
+    );
+
+    setMessage("");
+  } catch (error) {
+    setMessage(
+      error instanceof Error
+        ? error.message
+        : "Could not update item."
+    );
+  }
+}
+  const completedTasks = tasks.filter((item) => item.done).length;
+  const completedGoals = goals.filter((item) => item.done).length;
+  const completedHabits = habits.filter((item) => item.done).length;
+
+  if (loading) {
+    return (
+      <main className="flex min-h-screen items-center justify-center bg-slate-50">
+        <p className="text-lg font-semibold text-violet-700">
+          Loading your LifePilot dashboard...
+        </p>
+      </main>
+    );
+  }
+
+  if (message && tasks.length === 0 && goals.length === 0 && habits.length === 0) {
+    return (
+      <main className="flex min-h-screen items-center justify-center bg-slate-50 p-6">
+        <div className="rounded-2xl bg-white p-8 text-center shadow">
+          <h1 className="mb-3 text-2xl font-bold text-violet-700">
+            LifePilot ✨
+          </h1>
+          <p className="text-slate-600">{message}</p>
+        </div>
+      </main>
+    );
+  }
+
+  return (
+    <main className="min-h-screen bg-slate-50 p-6 text-slate-800 md:p-10">
+      <div className="mx-auto max-w-6xl">
+
+        <header className="mb-10 flex flex-wrap items-center justify-between gap-4">
+          <div>
+            <p className="text-sm font-semibold text-violet-600">
+              YOUR PERSONAL LIFE COMPANION
+            </p>
+            <h1 className="text-3xl font-bold">LifePilot ✨</h1>
+          </div>
+          <div className="rounded-full bg-white px-5 py-3 shadow-sm">
+            🌞 Your day starts here
+          </div>
+          <button
+  type="button"
+  onClick={handleLogout}
+  className="rounded-lg bg-red-500 px-4 py-2 text-white hover:bg-red-600"
+>
+  Log out
+</button>
+        </header>
+
+        <section className="mb-8 rounded-3xl bg-gradient-to-r from-violet-600 to-indigo-500 p-8 text-white shadow-lg">
+          <p className="mb-2 text-violet-100">WELCOME TO YOUR DASHBOARD</p>
+          <h2 className="mb-3 text-3xl font-bold">Make today count!</h2>
+          <p className="text-violet-100">
+            Small steps today. Big changes tomorrow.
+          </p>
+        </section>
+
+        {message && (
+          <p className="mb-5 rounded-xl bg-red-50 p-3 text-sm text-red-700">
+            {message}
+          </p>
+        )}
+
+        <section className="mb-8">
+          <h2 className="mb-4 text-xl font-bold">Your daily overview</h2>
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+
+            <div className="rounded-2xl bg-white p-5 shadow-sm">
+              <p className="text-2xl">✅</p>
+              <h3 className="mt-3 font-semibold">Tasks</h3>
+              <p className="text-sm text-slate-500">
+                {completedTasks} of {tasks.length} completed
+              </p>
+            </div>
+
+            <div className="rounded-2xl bg-white p-5 shadow-sm">
+              <p className="text-2xl">🎯</p>
+              <h3 className="mt-3 font-semibold">Goals</h3>
+              <p className="text-sm text-slate-500">
+                {completedGoals} of {goals.length} achieved
+              </p>
+            </div>
+
+            <div className="rounded-2xl bg-white p-5 shadow-sm">
+              <p className="text-2xl">💧</p>
+              <h3 className="mt-3 font-semibold">Hydration</h3>
+              <p className="text-sm text-slate-500">
+                Remember to drink water
+              </p>
+            </div>
+
+            <div className="rounded-2xl bg-white p-5 shadow-sm">
+              <p className="text-2xl">🌿</p>
+              <h3 className="mt-3 font-semibold">Habits</h3>
+              <p className="text-sm text-slate-500">
+                {completedHabits} of {habits.length} completed today
+              </p>
+            </div>
+
+          </div>
+        </section>
+
+        <section className="mb-8 grid gap-4 md:grid-cols-2">
+
+          {/* TASKS */}
+          <div className="rounded-2xl bg-white p-6 shadow-sm">
+            <h2 className="mb-4 text-xl font-bold">📅 Today's tasks</h2>
+
+            <div className="mb-4 flex gap-2">
+              <input
+                value={newTask}
+                onChange={(e) => setNewTask(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter")
+                    addItem(newTask, "task", setTasks, () => setNewTask(""));
+                }}
+                placeholder="Add a new task..."
+                className="min-w-0 flex-1 rounded-xl border p-3"
+              />
+              <input
+  type="date"
+  value={newTaskDate}
+  onChange={(e) => setNewTaskDate(e.target.value)}
+  aria-label="Choose task date"
+  className="rounded-xl border border-slate-300 p-3 text-slate-700"
+/>
+              <button
+                onClick={() => addItem(newTask, "task", setTasks, () => setNewTask(""))}
+                className="rounded-xl bg-violet-600 px-4 text-white"
+              >
+                Add
+              </button>
+            </div>
+
+            {tasks.map((item) => (
+  <div
+    key={item.id}
+    className="mb-2 flex items-center justify-between gap-3 rounded-xl bg-slate-50 p-3"
+  >
+    <label className="flex min-w-0 items-center gap-3">
+      <input
+        type="checkbox"
+        checked={item.done}
+        onChange={() => toggleItem(item, "task", setTasks)}
+      />
+
+      <span
+        className={
+          item.done ? "line-through text-slate-400" : ""
+        }
+      >
+        {item.name}
+      </span>
+    </label>
+
+    <button
+  type="button"
+  onClick={() => editItem(item, "task", setTasks)}
+  className="shrink-0 rounded-lg px-3 py-1 text-sm font-medium text-violet-600 hover:bg-violet-50"
+>
+  Edit
+</button>
+    <button
+      type="button"
+      onClick={() => deleteItem(item, "task", setTasks)}
+      className="shrink-0 rounded-lg px-3 py-1 text-sm font-medium text-red-600 hover:bg-red-50"
+    >
+      Delete
+    </button>
+  </div>
+))}
+          </div>
+
+          {/* GOALS */}
+          <div className="rounded-2xl bg-white p-6 shadow-sm">
+            <h2 className="mb-4 text-xl font-bold">🎯 My personal goals</h2>
+
+            <div className="mb-4 flex gap-2">
+              <input
+                value={newGoal}
+                onChange={(e) => setNewGoal(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter")
+                    addItem(newGoal, "goal", setGoals, () => setNewGoal(""));
+                }}
+                placeholder="Add a personal goal..."
+                className="min-w-0 flex-1 rounded-xl border p-3"
+              />
+              <button
+                onClick={() => addItem(newGoal, "goal", setGoals, () => setNewGoal(""))}
+                className="rounded-xl bg-violet-600 px-4 text-white"
+              >
+                Add
+              </button>
+            </div>
+
+            {goals.map((item) => (
+  <div
+    key={item.id}
+    className="mb-2 flex items-center justify-between gap-3 rounded-xl bg-slate-50 p-3"
+  >
+    <label className="flex min-w-0 items-center gap-3">
+      <input
+        type="checkbox"
+        checked={item.done}
+        onChange={() => toggleItem(item, "goal", setGoals)}
+      />
+
+      <span
+        className={
+          item.done ? "line-through text-slate-400" : ""
+        }
+      >
+        {item.name}
+      </span>
+    </label>
+<button
+  type="button"
+  onClick={() => editItem(item, "goal", setGoals)}
+  className="shrink-0 rounded-lg px-3 py-1 text-sm font-medium text-violet-600 hover:bg-violet-50"
+>
+  Edit
+</button>
+    <button
+      type="button"
+      onClick={() => deleteItem(item, "goal", setGoals)}
+      className="shrink-0 rounded-lg px-3 py-1 text-sm font-medium text-red-600 hover:bg-red-50"
+    >
+      Delete
+    </button>
+  </div>
+))}
+          </div>
+
+        </section>
+
+        {/* HABITS */}
+        <section className="rounded-2xl bg-white p-6 shadow-sm">
+          <h2 className="mb-4 text-xl font-bold">🌱 My daily habits</h2>
+
+          <p className="mb-4 text-sm text-slate-500">
+            Build small positive habits, one day at a time.
+          </p>
+
+          <div className="mb-4 flex gap-2">
+            <input
+              value={newHabit}
+              onChange={(e) => setNewHabit(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter")
+                  addItem(newHabit, "habit", setHabits, () => setNewHabit(""));
+              }}
+              placeholder="Add a healthy habit..."
+              className="min-w-0 flex-1 rounded-xl border p-3"
+            />
+            <button
+              onClick={() => addItem(newHabit, "habit", setHabits, () => setNewHabit(""))}
+              className="rounded-xl bg-emerald-600 px-4 text-white"
+            >
+              Add habit
+            </button>
+          </div>
+
+          {habits.map((item) => (
+  <div
+    key={item.id}
+    className="mb-2 flex items-center justify-between gap-3 rounded-xl bg-slate-50 p-3"
+  >
+    <label className="flex min-w-0 items-center gap-3">
+      <input
+        type="checkbox"
+        checked={item.done}
+        onChange={() => toggleItem(item, "habit", setHabits)}
+      />
+
+      <span
+        className={
+          item.done ? "line-through text-slate-400" : ""
+        }
+      >
+        {item.name}
+      </span>
+    </label>
+
+    <button
+  type="button"
+  onClick={() => editItem(item, "habit", setHabits)}
+  className="shrink-0 rounded-lg px-3 py-1 text-sm font-medium text-violet-600 hover:bg-violet-50"
+>
+  Edit
+</button>
+    <button
+      type="button"
+      onClick={() => deleteItem(item, "habit", setHabits)}
+      className="shrink-0 rounded-lg px-3 py-1 text-sm font-medium text-red-600 hover:bg-red-50"
+    >
+      Delete
+    </button>
+  </div>
+))}
+        </section>
+
+        <footer className="mt-10 text-center text-sm text-slate-400">
+          LifePilot · Your life, moving forward.
+        </footer>
+
+      </div>
+    </main>
+  );
+}
